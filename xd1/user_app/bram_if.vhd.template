@@ -1,0 +1,207 @@
+-------------------------------------------------------------------------------
+-- Title      : Block RAM Interface
+-- Project    : Hello World FPGA
+-------------------------------------------------------------------------------
+-- File       : $RCSfile: bram_if.vhd,v $
+-- Author     : Cray Canada
+-- Company    : Cray Canada Inc.
+-- Created    : 2004-12-16
+-- Last update: 2005/05/31
+-------------------------------------------------------------------------------
+-- Description: This block interfaces the RT Client block to a block RAM
+-- generated using Xilinx's Coregen tool.
+-------------------------------------------------------------------------------
+-- Copyright (c) 2004 Cray Canada Inc.
+-------------------------------------------------------------------------------
+-- Revisions  :
+-- $Log: bram_if.vhd,v $
+-- Revision 1.2  2005/01/25 22:45:17 
+-- Simplified and made block RAM single port.
+--
+-- Revision 1.1  2004/12/22 23:55:00 
+-- Initial checkin.
+--
+-------------------------------------------------------------------------------
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.std_logic_unsigned.all;
+use ieee.std_logic_misc.all;
+use work.user_pkg.all;
+
+entity bram_if is
+  port (
+    reset_n  : in  std_logic;
+    user_clk : in  std_logic;
+    rt_req   : in  t_rt_req;
+    rt_resp  : out t_rt_resp
+    );
+end entity bram_if;
+
+architecture rtl of bram_if is
+
+  -----------------------------------------------------------------------------
+  -- Declare Components
+  -----------------------------------------------------------------------------
+  attribute box_type : string;
+
+  component block_ram is
+    port (
+      addr : in  std_logic_vector(10 downto 0);
+      clk  : in  std_logic;
+      din  : in  std_logic_vector(7 downto 0);
+      dout : out std_logic_vector(7 downto 0);
+      we   : in  std_logic); 
+  end component block_ram;
+
+  -- Apply the 'black box' attribute to the block_ram component to let the
+  -- synthesizer know that the logic for the component will be brought in at a
+  -- later date (i.e. there is no synthesizable source code).  The block_ram
+  -- component was generated with Xilinx's Coregen software.
+  attribute box_type of block_ram : component is "black_box";
+
+  component pgpg_mem is
+    port (
+      RST           : in  std_logic;
+      SYS_CLK       : in  std_logic;
+      PIPE_CLK      : in  std_logic;
+      ADR           : in  std_logic_vector(18 downto 0);
+      WE            : in  std_logic;
+      DTI           : in  std_logic_vector(63 downto 0);
+      DTO           : out std_logic_vector(63 downto 0);
+      FPGA_NO       : in std_logic_vector(1 downto 0));
+  end component pgpg_mem;
+
+  signal pipe_rst : std_logic;
+  signal pipe_we  : std_logic;
+  signal pipe_dti : std_logic_vector(63 downto 0);
+  signal pipe_dto : std_logic_vector(63 downto 0);
+  constant pipe_fpgano : std_logic_vector(1 downto 0) := "00";
+  -----------------------------------------------------------------------------
+  -- Declare Signals
+  -----------------------------------------------------------------------------
+--  signal s_bram_addr  : std_logic_vector(10 downto 0);
+  signal s_bram_addr  : std_logic_vector(18 downto 0);
+  signal s_bram_we    : std_logic_vector(7 downto 0);
+  signal s_bram_wdata : t_byte_array(7 downto 0);
+  signal s_bram_rdata : t_byte_array(7 downto 0);
+  signal s_bram_rdata_tmp : t_byte_array(7 downto 0);
+
+  signal s_bram_addr_tmp0  : std_logic_vector(10 downto 0);
+  signal s_bram_addr_tmp1  : std_logic_vector(10 downto 0);
+  signal s_bram_addr_tmp2  : std_logic_vector(10 downto 0);
+  signal s_bram_addr_tmp3  : std_logic_vector(10 downto 0);
+  signal s_bram_addr_tmp4  : std_logic_vector(10 downto 0);
+
+begin  -- architecture rtl
+
+  -----------------------------------------------------------------------------
+  -- Block RAM Control
+  -- This process generates the write control signals based on the RT Client
+  -- request bus.  The RAM write strobes are driven if the block's write strobe
+  -- (rt_req.wr(bram)) is asserted and the corresponding byte mask is asserted.
+  -- The RAM address and write data are just registered versions of the RT
+  -- client request bus.
+  -----------------------------------------------------------------------------
+
+  ram_control : process (user_clk, reset_n) is
+  begin  -- process ram_control
+    if reset_n = '0' then               -- asynchronous reset (active low)
+      s_bram_we    <= (others => '0');
+      s_bram_wdata <= (others => (others => '0'));
+      s_bram_addr  <= (others => '0');
+    elsif user_clk'event and user_clk = '1' then  -- rising clock edge
+      -- Create the RAM write enable signal.
+      if (rt_req.wr(bram) = '1') then
+        s_bram_we <= rt_req.mask;
+      else
+        s_bram_we <= (others => '0');
+      end if;
+      -- Register the data and address from the request bus to align them
+      -- with the write enable.
+      s_bram_wdata <= rt_req.wdata;
+--      s_bram_addr  <= rt_req.addr(13 downto 3);
+      s_bram_addr  <= rt_req.addr(21 downto 3);
+    end if;
+  end process ram_control;
+
+  -----------------------------------------------------------------------------
+  -- Block RAMs
+  -- Instantiate eight 2048x8 bit block RAMs.  A 'for .. generate' loop is used
+  -- for convenience and to reduce code.  Eight byte wide RAMs are created so
+  -- that we can have separate write enables for each byte.  This allows
+  -- the processor to do any size of read or write access to the RAMs.
+  --
+  -- Note: the block RAMs could also be 'inferred'.  The exact code to infer
+  -- RAMs tends to depend on the synthesizer used.  Additionally, synthesizers
+  -- often only support a subset of the possible block RAM configurations
+  -- whereas Coregen allows all configurations (full dual port for example) to
+  -- be used.
+  -----------------------------------------------------------------------------
+
+  pipe_rst <= not reset_n;
+  pipe_we  <= s_bram_we(0) and s_bram_we(1) and s_bram_we(2) and s_bram_we(3) and
+              s_bram_we(4) and s_bram_we(5) and s_bram_we(6) and s_bram_we(7);
+  pipe_dti <= s_bram_wdata(7) & s_bram_wdata(6) & s_bram_wdata(5) & s_bram_wdata(4) & 
+              s_bram_wdata(3) & s_bram_wdata(2) & s_bram_wdata(1) & s_bram_wdata(0);
+
+  s_bram_rdata(0) <= pipe_dto( 7 downto  0);
+  s_bram_rdata(1) <= pipe_dto(15 downto  8);
+  s_bram_rdata(2) <= pipe_dto(23 downto 16);
+  s_bram_rdata(3) <= pipe_dto(31 downto 24);
+  s_bram_rdata(4) <= pipe_dto(39 downto 32);
+  s_bram_rdata(5) <= pipe_dto(47 downto 40);
+  s_bram_rdata(6) <= pipe_dto(55 downto 48);
+  s_bram_rdata(7) <= pipe_dto(63 downto 56);
+
+  pgr_inst : pgpg_mem
+    port map (
+      RST           => pipe_rst,
+      SYS_CLK       => user_clk,
+      PIPE_CLK      => user_clk,
+      ADR           => s_bram_addr,
+      WE            => pipe_we,
+      DTI           => pipe_dti,
+      DTO           => pipe_dto,
+      FPGA_NO       => pipe_fpgano);
+
+--  generate_rams : for byte in 0 to 7 generate
+--    block_ram_inst : block_ram
+--      port map (
+--        addr => s_bram_addr(10 downto 0),
+--        clk  => user_clk,
+--        din  => s_bram_wdata(byte),
+--        dout => s_bram_rdata(byte),
+--        we   => s_bram_we(byte));
+--  end generate generate_rams;
+
+  -- Drive output ports
+  rt_resp.rdata <= s_bram_rdata;
+  rt_resp.busy  <= '0';                 -- never busy right now.
+
+end architecture rtl;
+
+
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
+-- ****************************************************************************
